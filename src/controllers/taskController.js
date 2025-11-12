@@ -1,97 +1,190 @@
-import { Draggable } from 'react-beautiful-dnd';
-import { FiCalendar, FiUser, FiMoreVertical } from 'react-icons/fi';
-import { useState } from 'react';
+import Task from "../models/Task.js";
+import Project from "../models/Project.js";
+import User from "../models/User.js";
 
-const TaskCard = ({ task, index, onEdit, onDelete, isOwner }) => { // Add isOwner prop
-  const [showMenu, setShowMenu] = useState(false);
+// @desc    Create new task
+// @route   POST /api/projects/:projectId/tasks
+export const createTask = async (req, res) => {
+  try {
+    const { title, description, assignedTo, status, dueDate } = req.body;
+    const { projectId } = req.params;
 
-  return (
-    <Draggable draggableId={task._id} index={index}>
-      {(provided, snapshot) => (
-        <div
-          ref={provided.innerRef}
-          {...provided.draggableProps}
-          {...provided.dragHandleProps}
-          className={`bg-white rounded-lg p-3 mb-3 shadow-sm hover:shadow-md transition-all ${
-            snapshot.isDragging ? 'shadow-xl opacity-90' : ''
-          }`}
-        >
-          {/* Header */}
-          <div className="flex items-start justify-between gap-2 mb-2">
-            <h4 className="font-medium text-gray-900 text-sm flex-1">
-              {task.title}
-            </h4>
-            {/* Only show menu if user is owner */}
-            {isOwner && (
-              <div className="relative">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowMenu(!showMenu);
-                  }}
-                  className="text-gray-400 hover:text-gray-600 p-1"
-                >
-                  <FiMoreVertical size={16} />
-                </button>
-                
-                {showMenu && (
-                  <>
-                    <div className="absolute right-0 mt-1 w-32 bg-white rounded-lg shadow-lg border z-20">
-                      <button
-                        onClick={() => {
-                          onEdit(task);
-                          setShowMenu(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => {
-                          onDelete(task);
-                          setShowMenu(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                    <div
-                      className="fixed inset-0 z-10"
-                      onClick={() => setShowMenu(false)}
-                    />
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+    // Check if project exists
+    const project = await Project.findById(projectId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: "Project not found",
+      });
+    }
 
-          {/* Description */}
-          {task.description && (
-            <p className="text-xs text-gray-600 mb-2 line-clamp-2">
-              {task.description}
-            </p>
-          )}
+    // Check if user is a member
+    const isMember = project.members.some(
+      (member) => member.toString() === req.user._id.toString()
+    );
 
-          {/* Footer */}
-          <div className="flex items-center gap-2 text-xs text-gray-500">
-            {task.assignedTo && (
-              <div className="flex items-center gap-1">
-                <FiUser size={12} />
-                <span>{task.assignedTo.name || task.assignedTo.email.split('@')[0]}</span>
-              </div>
-            )}
-            {task.dueDate && (
-              <div className="flex items-center gap-1">
-                <FiCalendar size={12} />
-                <span>{new Date(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </Draggable>
-  );
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "Only project members can create tasks",
+      });
+    }
+
+    // Find assigned user if email provided
+    let assignedUserId = null;
+    if (assignedTo) {
+      const assignedUser = await User.findOne({ email: assignedTo });
+      if (assignedUser) {
+        assignedUserId = assignedUser._id;
+      }
+    }
+
+    // Create task
+  // Line 49 - Update the default status
+const task = await Task.create({
+  title,
+  description,
+  projectId,
+  assignedTo: assignedUserId,
+  status: status || "todo", // ← Changed to lowercase
+  dueDate,
+  createdBy: req.user._id,
+});
+
+
+    await task.populate("assignedTo createdBy", "name email");
+
+    // Emit socket event if io is available
+    if (req.app.get("io")) {
+      req.app.get("io").to(projectId).emit("taskCreated", task);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Task created successfully",
+      task,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
 };
 
-export default TaskCard;
+// @desc    Update task
+// @route   PATCH /api/tasks/:id
+export const updateTask = async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id);
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: "Task not found",
+      });
+    }
+
+    // Check if user is a project member
+    const project = await Project.findById(task.projectId);
+    const isMember = project.members.some(
+      (member) => member.toString() === req.user._id.toString()
+    );
+
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "Only project members can update tasks",
+      });
+    }
+
+    const { title, description, assignedTo, status, dueDate } = req.body;
+
+    // Update fields
+    if (title) task.title = title;
+    if (description !== undefined) task.description = description;
+    if (status) task.status = status;
+    if (dueDate !== undefined) task.dueDate = dueDate;
+
+    // Update assigned user
+    if (assignedTo !== undefined) {
+      if (assignedTo) {
+        const assignedUser = await User.findOne({ email: assignedTo });
+        task.assignedTo = assignedUser ? assignedUser._id : null;
+      } else {
+        task.assignedTo = null;
+      }
+    }
+
+    await task.save();
+    await task.populate("assignedTo createdBy", "name email");
+
+    // Emit socket event if io is available
+    if (req.app.get("io")) {
+      req.app.get("io").to(task.projectId.toString()).emit("taskUpdated", task);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Task updated successfully",
+      task,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Delete task
+// @route   DELETE /api/tasks/:id
+export const deleteTask = async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id);
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: "Task not found",
+      });
+    }
+
+    // Check if user is a project member
+    const project = await Project.findById(task.projectId);
+    const isMember = project.members.some(
+      (member) => member.toString() === req.user._id.toString()
+    );
+
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "Only project members can delete tasks",
+      });
+    }
+
+    const projectId = task.projectId.toString();
+    await task.deleteOne();
+
+    // Emit socket event if io is available
+    if (req.app.get("io")) {
+      req.app
+        .get("io")
+        .to(projectId)
+        .emit("taskDeleted", { taskId: req.params.id });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Task deleted successfully",
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
